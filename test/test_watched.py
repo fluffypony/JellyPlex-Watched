@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import sys
 import os
 
@@ -18,10 +18,12 @@ from src.watched import (
     LibraryData,
     MediaIdentifiers,
     MediaItem,
+    Ord,
     Series,
     UserData,
     WatchedStatus,
     cleanup_watched,
+    compare_media_items,
 )
 
 viewed_date = datetime.today()
@@ -676,6 +678,91 @@ def test_simple_cleanup_watched():
 
     assert return_watched_list_1 == expected_watched_list_1
     assert return_watched_list_2 == expected_watched_list_2
+
+
+# ─────────────────────────────────────────────────────────────
+# compare_media_items priority tests
+#
+# These tests pin the rule that completed always wins over partial, and that
+# between two partial states the further-along one wins. Previously a more
+# recently viewed partial state could override a completed one — see the
+# scenario where a user watches 35 minutes on Plex, then later finishes the
+# same item on Jellyfin: the sync must end up with both servers marked as
+# completed, not both reset to 35 minutes.
+
+_IDS = MediaIdentifiers(
+    title="Test Item",
+    locations=("Test Item.mkv",),
+    imdb_id="tt0000001",
+)
+
+
+def _item(completed: bool, time_ms: int, viewed_date: datetime) -> MediaItem:
+    return MediaItem(
+        identifiers=_IDS,
+        status=WatchedStatus(
+            completed=completed, time=time_ms, viewed_date=viewed_date
+        ),
+    )
+
+
+def test_completed_beats_partial_even_when_partial_is_more_recent():
+    # The exact bug the user hit: Plex sits at 35 min with a recent viewed_date
+    # (e.g. lastViewedAt was missing so it defaulted to "now"), Jellyfin is
+    # completed but its LastPlayedDate is hours older. Completed must still win.
+    now = datetime.now(timezone.utc)
+    plex_partial = _item(completed=False, time_ms=35 * 60 * 1000, viewed_date=now)
+    jelly_completed = _item(
+        completed=True, time_ms=0, viewed_date=now - timedelta(hours=3)
+    )
+
+    assert compare_media_items(plex_partial, jelly_completed, env={}) == Ord.B_BETTER
+    assert compare_media_items(jelly_completed, plex_partial, env={}) == Ord.A_BETTER
+
+
+def test_completed_beats_partial_when_completed_is_more_recent():
+    now = datetime.now(timezone.utc)
+    completed = _item(completed=True, time_ms=0, viewed_date=now)
+    partial = _item(
+        completed=False, time_ms=35 * 60 * 1000, viewed_date=now - timedelta(hours=3)
+    )
+
+    assert compare_media_items(completed, partial, env={}) == Ord.A_BETTER
+    assert compare_media_items(partial, completed, env={}) == Ord.B_BETTER
+
+
+def test_both_completed_is_tie():
+    now = datetime.now(timezone.utc)
+    a = _item(completed=True, time_ms=0, viewed_date=now)
+    b = _item(completed=True, time_ms=0, viewed_date=now - timedelta(days=1))
+
+    assert compare_media_items(a, b, env={}) == Ord.TIE
+    assert compare_media_items(b, a, env={}) == Ord.TIE
+
+
+def test_both_partial_higher_time_wins():
+    now = datetime.now(timezone.utc)
+    further = _item(
+        completed=False, time_ms=50 * 60 * 1000, viewed_date=now - timedelta(hours=2)
+    )
+    earlier = _item(completed=False, time_ms=10 * 60 * 1000, viewed_date=now)
+
+    # Even though `earlier` was viewed more recently, the further-along state wins.
+    assert compare_media_items(further, earlier, env={}) == Ord.A_BETTER
+    assert compare_media_items(earlier, further, env={}) == Ord.B_BETTER
+
+
+def test_both_partial_within_10s_is_tie():
+    now = datetime.now(timezone.utc)
+    a = _item(completed=False, time_ms=600_000, viewed_date=now)
+    b = _item(
+        completed=False,
+        time_ms=600_000 + 5_000,  # 5s later, within the 10s tolerance
+        viewed_date=now - timedelta(hours=1),
+    )
+
+    assert compare_media_items(a, b, env={}) == Ord.TIE
+    assert compare_media_items(b, a, env={}) == Ord.TIE
 
 
 # def test_mapping_cleanup_watched():
