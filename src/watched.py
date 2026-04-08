@@ -61,59 +61,57 @@ def compare_media_items(
         f"\n'{media2.identifiers}' (completed={media2.status.completed}, time={media2.status.time}, viewed_date={media2.status.viewed_date})"
     )
 
-    media1_viewed_date, media2_viewed_date = (
-        to_aware_utc(media1.status.viewed_date),
-        to_aware_utc(media2.status.viewed_date),
-    )
-
-    # If both are completed, it's a tie.
+    # Priority 1: completed always wins over partial. If both are completed, it's a tie.
+    # We deliberately check completed status before viewed_date so that a partial state on one
+    # server can never override a finished state on another, even if the partial state happens
+    # to have a more recent viewed_date (e.g. a paused playback whose lastViewedAt drifted).
     if media1.status.completed and media2.status.completed:
         logger.trace("Both media items are completed. Considering it a tie.")
         return Ord.TIE
 
-    # If both are not completed, but their time is within 10 seconds, it's also a tie.
-    if (not media1.status.completed and not media2.status.completed) and abs(
-        media1.status.time - media2.status.time
-    ) <= 10 * 1_000:
-        logger.trace(
-            "Both media items are not completed but their time is within 10 seconds. Considering it a tie."
-        )
-        return Ord.TIE
-
-    # If both have viewed dates, compare them. If they are close enough, consider it a tie.
-    if media1_viewed_date and media2_viewed_date:
-        # Define threshold time as 25% above the average time plus sleep duration to account for minor discrepancies in viewing times.
-        threshold_time = (
-            float(get_env_value(env, "AVERAGE_TIME", "100.0")) * 1.25
-        ) + float(get_env_value(env, "SLEEP_DURATION", "5.0"))
-        # If not within threshold_time of each other, choose the more recent one as better.
-        if (
-            abs((media1_viewed_date - media2_viewed_date).total_seconds())
-            > threshold_time
-        ):
-            logger.trace(
-                f"Both media items have viewed dates that are more than {threshold_time} seconds apart. Chosing the more recent one as better."
-            )
-
-            return (
-                Ord.A_BETTER
-                if media1_viewed_date > media2_viewed_date
-                else Ord.B_BETTER
-            )
-
-    # If one is completed and the other isn't, the completed one is better.
     if media1.status.completed != media2.status.completed:
         logger.trace(
             "One media item is completed while the other is not. Choosing the completed one as better."
         )
         return Ord.A_BETTER if media1.status.completed else Ord.B_BETTER
 
-    # If both are not completed, compare their time. The one with the higher time is better.
+    # Priority 2: both are partial. The further-along (higher time) state wins.
+    # A 10-second window is treated as a tie to avoid ping-pong syncs from minor drift.
+    if abs(media1.status.time - media2.status.time) <= 10 * 1_000:
+        logger.trace(
+            "Both media items are not completed and their time is within 10 seconds. Considering it a tie."
+        )
+        return Ord.TIE
+
     if media1.status.time != media2.status.time:
         logger.trace(
             "Both media items are not completed but have different times. Choosing the one with the higher time as better."
         )
         return Ord.A_BETTER if media1.status.time > media2.status.time else Ord.B_BETTER
+
+    # Priority 3 (fallback tie-breaker): both partial with effectively identical time but
+    # different viewed_dates. Prefer the more recently viewed one if the gap is meaningfully
+    # larger than the sync cadence, otherwise tie.
+    media1_viewed_date, media2_viewed_date = (
+        to_aware_utc(media1.status.viewed_date),
+        to_aware_utc(media2.status.viewed_date),
+    )
+    if media1_viewed_date and media2_viewed_date:
+        threshold_time = (
+            float(get_env_value(env, "AVERAGE_TIME", "100.0")) * 1.25
+        ) + float(get_env_value(env, "SLEEP_DURATION", "5.0"))
+        if (
+            abs((media1_viewed_date - media2_viewed_date).total_seconds())
+            > threshold_time
+        ):
+            logger.trace(
+                f"Both media items have effectively identical times but viewed dates more than {threshold_time} seconds apart. Choosing the more recent one as better."
+            )
+            return (
+                Ord.A_BETTER
+                if media1_viewed_date > media2_viewed_date
+                else Ord.B_BETTER
+            )
 
     # If we can't determine a clear winner based on the above criteria, consider it a tie.
     logger.trace(
