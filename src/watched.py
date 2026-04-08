@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from loguru import logger
 from typing import Any
 
-from src.functions import search_mapping, to_aware_utc, get_env_value
+from src.functions import search_mapping
 
 
 class Ord(IntEnum):
@@ -83,41 +83,10 @@ def compare_media_items(
         )
         return Ord.TIE
 
-    if media1.status.time != media2.status.time:
-        logger.trace(
-            "Both media items are not completed but have different times. Choosing the one with the higher time as better."
-        )
-        return Ord.A_BETTER if media1.status.time > media2.status.time else Ord.B_BETTER
-
-    # Priority 3 (fallback tie-breaker): both partial with effectively identical time but
-    # different viewed_dates. Prefer the more recently viewed one if the gap is meaningfully
-    # larger than the sync cadence, otherwise tie.
-    media1_viewed_date, media2_viewed_date = (
-        to_aware_utc(media1.status.viewed_date),
-        to_aware_utc(media2.status.viewed_date),
-    )
-    if media1_viewed_date and media2_viewed_date:
-        threshold_time = (
-            float(get_env_value(env, "AVERAGE_TIME", "100.0")) * 1.25
-        ) + float(get_env_value(env, "SLEEP_DURATION", "5.0"))
-        if (
-            abs((media1_viewed_date - media2_viewed_date).total_seconds())
-            > threshold_time
-        ):
-            logger.trace(
-                f"Both media items have effectively identical times but viewed dates more than {threshold_time} seconds apart. Choosing the more recent one as better."
-            )
-            return (
-                Ord.A_BETTER
-                if media1_viewed_date > media2_viewed_date
-                else Ord.B_BETTER
-            )
-
-    # If we can't determine a clear winner based on the above criteria, consider it a tie.
     logger.trace(
-        "Unable to determine a clear winner based on watched status. Considering it a tie."
+        "Both media items are not completed but have different times. Choosing the one with the higher time as better."
     )
-    return Ord.TIE
+    return Ord.A_BETTER if media1.status.time > media2.status.time else Ord.B_BETTER
 
 
 def merge_mediaitem_data(
